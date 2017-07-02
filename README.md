@@ -24,9 +24,7 @@ Before you can start capturing streams you first need to add models to your "fav
 
 For advanced users
 ==================
-There are several special URLs that allow implementing some operations with a "favourite list" which you can get using this link:
-
-[favourite list](https://showup.tv/site/favorites/)
+There are special URL that allow implementing some operations with a "favourite list" which you can get using this link: [favourite list](https://showup.tv/site/favorites/)
 
 You need to copy a 'csrf' number (something like sessionID) and you can easily edit your "favourite list" like on this example:
 
