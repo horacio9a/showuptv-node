@@ -32,3 +32,4 @@ You need to copy a 'csrf' number (something like sessionID) and you can easily e
 - remove from "favourite list" http://showup.tv/site/favorites/remove/1281189?csrf=839a1c53c0a3de0b90cbef86310f3e9f
 
 Number before '?csrf' is 'model UID' which you can see at the top of the "favourite list" in front of the model name.
+You can find 'csrf' if you look at the browser 'Page Source' - search for 'var csrf = '
