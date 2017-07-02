@@ -21,7 +21,6 @@ var config = yaml.safeLoad(fs.readFileSync('config.yml', 'utf8'));
 config.minFileSizeMb = config.minFileSizeMb || 0;
 
 var captureDirectory = path.resolve(config.captureDirectory || './capture');
-var completeDirectory = path.resolve(config.completeDirectory || './complete');
 
 mkdirp(captureDirectory, (err) => {
   if (err) {
@@ -30,28 +29,25 @@ mkdirp(captureDirectory, (err) => {
   }
 });
 
-mkdirp(completeDirectory, (err) => {
-  if (err) {
-    printErrorMsg(err);
-    process.exit(1);
-  }
-});
-
 function getCurrentDateTime() {
-  return moment().format('YYYY-MM-DDTHHmmss'); // The only true way of writing out dates and times, ISO 8601
-}
+  return moment().format(config.dateFormat);
+};
+
+function getCurrentTime() {
+  return moment().format('HH:mm:ss');
+};
 
 function printMsg(msg) {
-  console.log(colors.blue('[' + getCurrentDateTime() + ']'), msg);
+ console.log(colors.gray('[' + getCurrentTime() + ']'), msg);
 }
 
 function printErrorMsg(msg) {
-  console.log(colors.blue('[' + getCurrentDateTime() + ']'), colors.red('[ERROR]'), msg);
+  console.log(colors.gray('[' + getCurrentTime() + ']'), colors.red('[ERROR]'), msg);
 }
 
 function printDebugMsg(msg) {
   if (config.debug && msg) {
-    console.log(colors.blue('[' + getCurrentDateTime() + ']'), colors.yellow('[DEBUG]'), msg);
+   console.log(colors.gray('[' + getCurrentTime() + ']'), colors.magenta('[DEBUG]'), msg);
   }
 }
 
@@ -61,7 +57,7 @@ function getTimestamp() {
 
 function dumpModelsCurrentlyCapturing() {
   _.each(modelsCurrentlyCapturing, (m) => {
-    printDebugMsg(colors.red(m.pid) + '\t' + m.checkAfter + '\t' + m.filename);
+    printDebugMsg(m.pid + ' ' + (colors.yellow(m.filename)) + ' ' + (m.size/1048576).toFixed(1) + ' MB');
   });
 }
 
@@ -104,16 +100,16 @@ function getFavouriteModels() {
       var json = response.body;
 
       if (!json.list) {
-        throw new Error('Failed to get favorite models');
+        throw new Error('Failed to get favorite models.');
       }
 
       var favouriteModels = _.chain(json.list.split(';')).reject(m => !m).map(m => m.split(',')[1]).value();
 
-      printDebugMsg('Found these favorite models: ' + favouriteModels.join(', '));
+      printDebugMsg('Found these favorite models: ' + (colors.gray(favouriteModels.join(', '))));
 
       return favouriteModels;
     })
-    .timeout(15000, 'Failed to get favourite models');
+    .timeout(15000, 'Failed to get favourite models.');
 }
 
 function domainToIp(s) {
@@ -158,18 +154,18 @@ function getCommandArguments(modelName) {
       var startChildBug = rawHTML.match(/startChildBug\(user\.uid, '([\s\S]+?)', '([\s\S]+?)'/);
 
       if (!startChildBug || !startChildBug[1] || !startChildBug[2]) {
-        throw new Error('startChildBug is unavailable');
+        throw new Error('startChildBug is unavailable.');
       }
 
       var wsPassword = startChildBug[1];
       var serverAddr = startChildBug[2];
 
       if (!wsPassword) {
-        throw new Error('wsPassword is unavailable');
+        throw new Error('wsPassword is unavailable.');
       }
 
       if (!serverAddr) {
-        throw new Error('serverAddr is unavailable');
+        throw new Error('serverAddr is unavailable.');
       }
 
       var wsUrl = domainToIp(serverAddr);
@@ -203,11 +199,11 @@ function getCommandArguments(modelName) {
                 if (json.value[0] === 'failure') {
                   connection.close();
 
-                  reject('Model might be offline');
+                  reject('Model is offline.');
                 } else if (json.value[0] === 'alreadyJoined') {
                   connection.close();
 
-                  reject('Another stream of this model exists');
+                  reject('Another stream of this model exists.');
                 }
               }
 
@@ -236,7 +232,7 @@ function createCaptureProcess(modelName) {
   var model = _.findWhere(modelsCurrentlyCapturing, { modelName: modelName });
 
   if (!_.isUndefined(model)) {
-    printDebugMsg(colors.green(modelName) + ' is already capturing');
+    printDebugMsg(colors.green(modelName) + ' is already recording.');
     return; // resolve immediately
   }
 
@@ -244,26 +240,18 @@ function createCaptureProcess(modelName) {
     .try(() => {
       return getCommandArguments(modelName);
     }).then((commandArguments) => {
-      printMsg(colors.green(modelName) + ' is now online, starting rtmpdump process');
+      printMsg(colors.green(modelName) + (colors.yellow(' is online >>> start recording.')));
 
-      var filename = modelName + '_' + getCurrentDateTime() + '.flv';
+      var filename = modelName + '_SU_' + getCurrentDateTime() + '.flv';
 
       var spawnArguments = [
-        '--live',
-        '-a',
-        'liveedge',
-        config.rtmpDebug ? '' : '--quiet',
-        '-s',
-        'http://showup.tv/flash/suStreamer.swf',
-        '--rtmp',
-        `rtmp://${commandArguments.streamServer}/liveedge`,
-        '--pageUrl',
-        'http://showup.tv/' + modelName,
-        '--playpath',
-        commandArguments.playpath,
-        '--flv',
-        captureDirectory + '/' + filename
-      ];
+        '-r',`rtmp://${commandArguments.streamServer}/liveedge`,
+        '-a','liveedge',
+        '-W','http://showup.tv/flash/suStreamer.swf',
+        '-p','http://showup.tv/' + modelName,
+        '-y',commandArguments.playpath,
+        '--live',(config.rtmpDebug && msg) ? '' : '-q',
+        '-o',captureDirectory + '/' + filename];
 
       // printDebugMsg(spawnArguments);
 
@@ -278,7 +266,7 @@ function createCaptureProcess(modelName) {
       });
 
       captureProcess.on('close', (code) => {
-        printMsg(colors.green(modelName) + ' stopped streaming');
+        printMsg(colors.green(modelName) + (colors.cyan(' <<< stopped recording.')));
 
         var stoppedModel = _.findWhere(modelsCurrentlyCapturing, { pid: captureProcess.pid });
 
@@ -298,14 +286,8 @@ function createCaptureProcess(modelName) {
               printErrorMsg('[' + colors.green(modelName) + '] ' + err.toString());
             }
           } else if (stats.size === 0 || stats.size < (config.minFileSizeMb * 1048576)) {
-            fs.unlink(captureDirectory + '/' + filename, (e) => {
+            fs.unlink(captureDirectory + '/' + filename, function(err) {
               // do nothing, shit happens
-            });
-          } else {
-            fs.rename(captureDirectory + '/' + filename, completeDirectory + '/' + filename, (e) => {
-              if (e) {
-                printErrorMsg('[' + colors.green(modelName) + '] ' + err.toString());
-              }
             });
           }
         });
@@ -334,7 +316,7 @@ function checkCaptureProcess(model) {
     return;
   }
 
-  printDebugMsg(colors.green(model.modelName) + ' should be checked');
+  printDebugMsg(colors.green(model.modelName) + ' should be checked.');
 
   return fs
     .statAsync(captureDirectory + '/' + model.filename)
@@ -349,7 +331,7 @@ function checkCaptureProcess(model) {
         model.size = stats.size;
       } else if (!_.isUndefined(model.captureProcess)) {
         // we assume that onClose will do clean up for us
-        printErrorMsg('[' + colors.green(model.modelName) + '] Process is dead');
+        printErrorMsg('[' + colors.green(model.modelName) + '] Process is dead.');
         model.captureProcess.kill();
       } else {
         // suppose here we should forcefully remove the model from modelsCurrentlyCapturing
@@ -367,7 +349,7 @@ function checkCaptureProcess(model) {
 }
 
 function mainLoop() {
-  printDebugMsg('Start searching for new models');
+  printDebugMsg('Start searching for new models.');
 
   Promise
     .try(() => login())
@@ -380,7 +362,7 @@ function mainLoop() {
     .finally(() => {
       dumpModelsCurrentlyCapturing();
 
-      printMsg('Done, will search for new models in ' + config.modelScanInterval + ' second(s).');
+      printMsg('Done >>> will search for new models in ' + config.modelScanInterval + ' seconds.');
 
       setTimeout(mainLoop, config.modelScanInterval * 1000);
     });
