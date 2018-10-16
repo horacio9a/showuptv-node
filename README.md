@@ -5,6 +5,7 @@ showuptv-node lets you follow and archive your favorite models' shows on showup.
 Requirements
 ============
 [RTMPDump(ksv)](https://github.com/BurntSushi/rtmpdump-ksv) used to recording the streams. Must be in directory with main.js or somewhwere in the path.
+
 [Node.js](https://nodejs.org/download/) used to run showuptv-node, hence the name.
 
 Setup
