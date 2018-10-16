@@ -1,8 +1,10 @@
-email: example@mail.com # Your showup.tv email
-password: thepassword # Your shoup.tv password
-captureDirectory: C:\Videos\ShowUp\ # Where you want the captures to be saved to
-dateFormat: DDMMYYYY-HHmmss # Youur date format for the name of the recorded file
+captureDirectory: C:\Videos\ShowUp\ # Where you want the recorded file to be saved to
+dateFormat: DDMMYYYY-HHmmss # Your date format in the name of the recorded file
 modelScanInterval: 60 # In seconds, how often showuptv-node checks for newly-online models
 debug: true
 rtmpDebug: false
-minFileSizeMb: 0
+minFileSizeMb: 1
+models:
+  - Model_Nr_1
+  - Model_Nr_2
+  - Model_Nr_3
