@@ -1,371 +1,190 @@
+// ShowUp.tv Recorder v.0.0.3
+
 'use strict';
 
-var Promise = require('bluebird');
-var fs = Promise.promisifyAll(require('fs'));
-var childProcess = require('child_process');
-var path = require('path');
-var _ = require('underscore');
-var bhttp = require('bhttp');
-var cheerio = require('cheerio');
-var colors = require('colors');
-var mkdirp = require('mkdirp');
-var moment = require('moment');
-var yaml = require('js-yaml');
-var WebSocketClient = require('websocket').client;
+const Promise = require('bluebird');
+const fs = Promise.promisifyAll(require('fs'));
+const childProcess = require('child_process');
+const path = require('path');
+const bhttp = require('bhttp');
+const cheerio = require('cheerio');
+const colors = require('colors');
+const moment = require('moment');
+const yaml = require('js-yaml');
+const mvAsync = Promise.promisify(require('mv'));
+const mkdirpAsync = Promise.promisify(require('mkdirp'));
 
-var session = bhttp.session();
-var modelsCurrentlyCapturing = [];
+const session = bhttp.session();
 
-var config = yaml.safeLoad(fs.readFileSync('config.yml', 'utf8'));
+const config = yaml.safeLoad(fs.readFileSync('config.yml', 'utf8'));
 
-config.minFileSizeMb = config.minFileSizeMb || 0;
+config.captureDirectory = config.captureDirectory || 'C:/Videos/ShowUp';
+config.modelScanInterval = config.modelScanInterval || 60;
+config.minFileSizeMb = config.minFileSizeMb || 5;
+config.debug = !!config.debug;
+config.rtmpDebug = !!config.rtmpDebug;
+config.models = Array.isArray(config.models) ? config.models : [];
+config.dateFormat = config.dateFormat || 'DDMMYYYY-HHmmss';
+config.createModelDirectory = !!config.createModelDirectory;
 
-var captureDirectory = path.resolve(config.captureDirectory || './capture');
+const captureDirectory = path.resolve(__dirname, config.captureDirectory);
+const minFileSize = config.minFileSizeMb * 1048576;
 
-mkdirp(captureDirectory, (err) => {
-  if (err) {
-    printErrorMsg(err);
-    process.exit(1);
-  }
-});
+let captures = [];
 
-function getCurrentDateTime() {
-  return moment().format(config.dateFormat);
-};
+function printMsg(...args) {console.log.apply(console, [colors.gray(`[${moment().format('HH:mm:ss')}]`), ...args])}
 
-function getCurrentTime() {
-  return moment().format('HH:mm:ss');
-};
+const printErrorMsg = printMsg.bind(printMsg, colors.red('[ERROR]'));
+const printDebugMsg = config.debug ? printMsg.bind(printMsg, colors.yellow('[DEBUG]')) : () => {};
 
-function printMsg(msg) {
- console.log(colors.gray('[' + getCurrentTime() + ']'), msg);
-}
-
-function printErrorMsg(msg) {
-  console.log(colors.gray('[' + getCurrentTime() + ']'), colors.red('[ERROR]'), msg);
-}
-
-function printDebugMsg(msg) {
-  if (config.debug && msg) {
-   console.log(colors.gray('[' + getCurrentTime() + ']'), colors.magenta('[DEBUG]'), msg);
-  }
-}
-
-function getTimestamp() {
-  return Math.floor(new Date().getTime() / 1000);
-}
-
-function dumpModelsCurrentlyCapturing() {
-  _.each(modelsCurrentlyCapturing, (m) => {
-    printDebugMsg(m.pid + ' ' + (colors.yellow(m.filename)) + ' ' + (m.size/1048576).toFixed(1) + ' MB');
-  });
-}
-
-function login() {
-  return Promise
-    .try(() => session.get('http://showup.tv/site/accept_rules/yes?ref=http://showup.tv/site/log_in', {
-      headers: {
-        referer: 'http://showup.tv/site/accept_rules?ref=http://showup.tv/site/log_in'
-      }
-    }))
-    .then(() => session.post('https://showup.tv/site/log_in?ref=http://showup.tv/TransList/fullList/lang/pl', {
-      email: config.email,
-      password: config.password,
-      remember: '',
-      submitLogin: 'Zaloguj'
-    }, {
-      headers: {
-        referer: 'https://showup.tv/site/log_in'
-      }
-    }))
-    .then((response) => {
-      var $ = cheerio.load(response.body);
-      var submitLogin = $('input[name="submitLogin"]').first().attr('name');
-
-      if (submitLogin === 'submitLogin') {
-        throw new Error('Failed to login');
-      }
-    })
-    .timeout(15000, 'Failed to login');
-}
-
-function getFavouriteModels() {
-  return Promise
-    .try(() => session.get('http://showup.tv/site/favorites', {
-      headers: {
-        referer: 'http://showup.tv'
-      }
-    }))
-    .then((response) => {
-      var json = response.body;
-
-      if (!json.list) {
-        throw new Error('Failed to get favorite models.');
-      }
-
-      var favouriteModels = _.chain(json.list.split(';')).reject(m => !m).map(m => m.split(',')[1]).value();
-
-      printDebugMsg('Found these favorite models: ' + (colors.gray(favouriteModels.join(', '))));
-
-      return favouriteModels;
-    })
-    .timeout(15000, 'Failed to get favourite models.');
-}
-
-function domainToIp(s) {
-  var ip = '';
-  var t = s.split(':');
-
-  if (t[0] === 'j12.showup.tv') {
-    ip = '94.23.171.122';
-  } else if (t[0] === 'j13.showup.tv') {
-    ip = '94.23.171.121';
-  } else if (t[0] === 'j11.showup.tv') {
-    ip = '94.23.171.115';
-  } else if (t[0] === 'j14.showup.tv') {
-    ip = '94.23.171.120';
-  }
-
-  return !ip ? `ws://${s}` : `ws://${ip}:${t[1]}`;
-}
-
-function getCommandArguments(modelName) {
-  return Promise
-    .try(() => session.get('http://showup.tv/' + modelName))
-    .then((response) => {
-      var rawHTML = response.body.toString('utf8');
-
-      var streamData = rawHTML.match(/'rtmp:\/\/([\s\S]+?)\/liveedge'/);
-
-      if (!streamData || !streamData[1]) {
-        throw new Error('streamData is unavailable');
-      }
-
-      var streamServer = streamData[1];
-
-      var user = rawHTML.match(/var user = new User\(([\s\S]+?),/);
-
-      if (!user || !user[1]) {
-        throw new Error('streamServer is unavailable');
-      }
-
-      var wsUID = user[1];
-
-      var startChildBug = rawHTML.match(/startChildBug\(user\.uid, '([\s\S]+?)', '([\s\S]+?)'/);
-
-      if (!startChildBug || !startChildBug[1] || !startChildBug[2]) {
-        throw new Error('startChildBug is unavailable.');
-      }
-
-      var wsPassword = startChildBug[1];
-      var serverAddr = startChildBug[2];
-
-      if (!wsPassword) {
-        throw new Error('wsPassword is unavailable.');
-      }
-
-      if (!serverAddr) {
-        throw new Error('serverAddr is unavailable.');
-      }
-
-      var wsUrl = domainToIp(serverAddr);
-
-      // printDebugMsg(streamServer);
-      // printDebugMsg(wsUID);
-      // printDebugMsg(wsPassword);
-      // printDebugMsg(wsUrl);
-
-      return new Promise((resolve, reject) => {
-        var client = new WebSocketClient();
-
-        client.on('connectFailed', (err) => {
-          reject(err);
-        });
-
-        client.on('connect', (connection) => {
-          connection.on('error', (err) => {
-            reject(err);
-          });
-
-          connection.on('message', (message) => {
-            if (message.type === 'utf8') {
-              var json = JSON.parse(message.utf8Data);
-
-              if (json.id === 143 && json.value[0] === '0') {
-                // printDebugMsg('Logged in');
-              }
-
-              if (json.id === 102 && json.value[0]) {
-                if (json.value[0] === 'failure') {
-                  connection.close();
-
-                  reject('Model is offline.');
-                } else if (json.value[0] === 'alreadyJoined') {
-                  connection.close();
-
-                  reject('Another stream of this model exists.');
-                }
-              }
-
-              if (json.id === 103 && json.value[0]) {
-                connection.close();
-
-                resolve({
-                  streamServer: streamServer,
-                  playpath: json.value[0]
-                });
-              }
-            }
-          });
-
-          connection.sendUTF(`{ "id": 0, "value": [${wsUID}, "${wsPassword}"]}`);
-          connection.sendUTF(`{ "id": 2, "value": ["${modelName}"]}`);
-        });
-
-        client.connect(wsUrl, '');
-      });
-    })
-    .timeout(15000);
-}
-
-function createCaptureProcess(modelName) {
-  var model = _.findWhere(modelsCurrentlyCapturing, { modelName: modelName });
-
-  if (!_.isUndefined(model)) {
-    printDebugMsg(colors.green(modelName) + ' is already recording.');
-    return; // resolve immediately
-  }
+function captureModel(params) {
+  const { model, streamServer, playpath } = params;
 
   return Promise
     .try(() => {
-      return getCommandArguments(modelName);
-    }).then((commandArguments) => {
-      printMsg(colors.green(modelName) + (colors.yellow(' is online >>> start recording.')));
+      printMsg(colors.green(model), 'is online, starting rtmpdump process');
 
-      var filename = modelName + '_SU_' + getCurrentDateTime() + '.flv';
+      const filename = `${model}_SU_${moment().format(config.dateFormat)}.flv`;
 
-      var spawnArguments = [
-        '-r',`rtmp://${commandArguments.streamServer}/liveedge`,
-        '-a','liveedge',
-        '-W','http://showup.tv/flash/suStreamer.swf',
-        '-p','http://showup.tv/' + modelName,
-        '-y',commandArguments.playpath,
-        '--live',(config.rtmpDebug && msg) ? '' : '-q',
-        '-o',captureDirectory + '/' + filename];
+      const spawnArguments = [
+        '--live',
+        config.rtmpDebug ? '' : '--quiet',
+        '--rtmp', `rtmp://${streamServer}/webrtc`,
+        '--playpath', `${playpath}_aac`,
+        '--flv', path.join(captureDirectory, filename),
+      ];
 
-      // printDebugMsg(spawnArguments);
+      printDebugMsg('spawnArguments:', spawnArguments);
 
-      var captureProcess = childProcess.spawn('rtmpdump', spawnArguments);
+      const proc = childProcess.spawn('rtmpdump', spawnArguments);
 
-      captureProcess.stdout.on('data', (data) => {
-        printMsg(data.toString);
+      proc.stdout.on('data', (data) => {
+        printMsg(data.toString());
       });
 
-      captureProcess.stderr.on('data', (data) => {
-        printMsg(data.toString);
+      proc.stderr.on('data', (data) => {
+        printMsg(data.toString());
       });
 
-      captureProcess.on('close', (code) => {
-        printMsg(colors.green(modelName) + (colors.cyan(' <<< stopped recording.')));
+      proc.on('close', () => {
+        printMsg(colors.green(model), 'stopped streaming');
 
-        var stoppedModel = _.findWhere(modelsCurrentlyCapturing, { pid: captureProcess.pid });
+        captures = captures.filter(c => c.model !== model);
 
-        if (!_.isUndefined(stoppedModel)) {
-          var modelIndex = modelsCurrentlyCapturing.indexOf(stoppedModel);
+        const src = path.join(captureDirectory, filename);
+        const dst = config.createModelDirectory
 
-          if (modelIndex !== -1) {
-            modelsCurrentlyCapturing.splice(modelIndex, 1);
-          }
-        }
-
-        fs.stat(captureDirectory + '/' + filename, (err, stats) => {
-          if (err) {
-            if (err.code === 'ENOENT') {
-              // do nothing, file does not exists
-            } else {
-              printErrorMsg('[' + colors.green(modelName) + '] ' + err.toString());
+        fs.statAsync(src)
+          // if the file is big enough we keep it otherwise we delete it
+          .then(stats => (stats.size <= minFileSize
+            ? fs.unlinkAsync(src)
+            : mvAsync(src, dst, { mkdirp: true })
+          ))
+          .catch((err) => {
+            if (err.code !== 'ENOENT') {
+              printErrorMsg(colors.red(`[${model}]`), err.toString());
             }
-          } else if (stats.size === 0 || stats.size < (config.minFileSizeMb * 1048576)) {
-            fs.unlink(captureDirectory + '/' + filename, function(err) {
-              // do nothing, shit happens
-            });
-          }
-        });
+          });
       });
 
-      if (!_.isUndefined(captureProcess.pid)) {
-        modelsCurrentlyCapturing.push({
-          modelName: modelName,
-          filename: filename,
-          captureProcess: captureProcess,
-          pid: captureProcess.pid,
-          checkAfter: getTimestamp() + 60, // we are gonna check the process after 60 seconds
-          size: 0
+      if (proc.pid) {
+        captures.push({
+          model,
+          filename,
+          proc,
+          checkAfter: moment().unix() + 60, // we are gonna check the process after 60 seconds
+          size: 0,
         });
       }
     })
     .catch((err) => {
-      printErrorMsg('[' + colors.green(modelName) + '] ' + err.toString());
+      printErrorMsg(colors.red(`[${model.model}]`), err.toString());
     });
 }
 
-function checkCaptureProcess(model) {
-  if (!model.checkAfter || model.checkAfter > getTimestamp()) {
+function checkCapture(capture) {
+  if (!capture.checkAfter || capture.checkAfter > moment().unix()) {
     // if this is not the time to check the process then we resolve immediately
-    printDebugMsg(colors.green(model.modelName) + ' - OK');
-    return;
+    printDebugMsg(colors.green(capture.model), '- OK');
+    return null;
   }
 
-  printDebugMsg(colors.green(model.modelName) + ' should be checked.');
+  printDebugMsg(colors.green(capture.model), 'should be checked');
 
   return fs
-    .statAsync(captureDirectory + '/' + model.filename)
+    .statAsync(path.join(captureDirectory, capture.filename))
     .then((stats) => {
       // we check the process after 60 seconds since the its start,
       // then we check it every 10 minutes,
       // if the size of the file has not changed over the time, we kill the process
-      if (stats.size - model.size > 0) {
-        printDebugMsg(colors.green(model.modelName) + ' - OK');
+      if (stats.size - capture.size > 0) {
+        printDebugMsg(colors.green(capture.model), '- OK');
 
-        model.checkAfter = getTimestamp() + 600; // 10 minutes
-        model.size = stats.size;
-      } else if (!_.isUndefined(model.captureProcess)) {
-        // we assume that onClose will do clean up for us
-        printErrorMsg('[' + colors.green(model.modelName) + '] Process is dead.');
-        model.captureProcess.kill();
-      } else {
-        // suppose here we should forcefully remove the model from modelsCurrentlyCapturing
-        // because her captureProcess is unset, but let's leave this as is
+        capture.checkAfter = moment().unix() + 600; // 10 minutes
+        capture.size = stats.size;
+      } else if (capture.model) {
+        // we assume that onClose will do all the cleaning for us
+        printErrorMsg(colors.red(`[${capture.model}]`), 'Process is dead');
+        capture.childProcess.kill();
       }
     })
     .catch((err) => {
       if (err.code === 'ENOENT') {
         // do nothing, file does not exists,
-        // this is kind of impossible case, however, probably there should be some code to "clean up" the process
       } else {
-        printErrorMsg('[' + colors.green(model.modelName) + '] ' + err.toString());
+        printErrorMsg(colors.red(`[${capture.model}]`), err.toString());
       }
     });
 }
 
 function mainLoop() {
-  printDebugMsg('Start searching for new models.');
+  printDebugMsg('Start searching for new models');
 
-  Promise
-    .try(() => login())
-    .then(() => getFavouriteModels())
-    .then((favouriteModels) => Promise.all(favouriteModels.map(createCaptureProcess)))
-    .then(() => Promise.all(modelsCurrentlyCapturing.map(checkCaptureProcess)))
-    .catch((err) => {
-      printErrorMsg(err);
+  return Promise
+    .try(() => session.get('https://showup.tv'))
+    .then(response => cheerio.load(response.body))
+    .then(($) => {
+      const onlineModels = [];
+
+      $('li[transcoderaddr][streamid]').each((i, e) => {
+        // printDebugMsg(e);
+        onlineModels.push({
+          model: $(e).find('.stream__meta h4').text(),
+          streamServer: e.attribs.transcoderaddr,
+          playpath: e.attribs.streamid,
+        });
+      });
+
+      return onlineModels;
     })
-    .finally(() => {
-      dumpModelsCurrentlyCapturing();
+    .then((onlineModels) => {
+      const configModels = yaml.safeLoad(fs.readFileSync('config.yml', 'utf8')).models;
 
-      printMsg('Done >>> will search for new models in ' + config.modelScanInterval + ' seconds.');
+      return onlineModels.filter(o => configModels.find(m => m === o.model));
+    })
+    .then(modelsToCapture => modelsToCapture.filter(m => !captures.find(p => p.model === m.model)))
+    .then(modelsToCapture => Promise.all(modelsToCapture.map(captureModel)))
+    .then(() => Promise.all(captures.map(checkCapture)))
+    .catch(printErrorMsg)
+    .finally(() => {
+      captures.forEach((c) => {
+        printDebugMsg(colors.grey(c.proc.pid.toString().padEnd(12, ' ')), colors.grey(c.checkAfter), colors.grey(c.filename));
+      });
+
+      printMsg('Done, will search for new models in', config.modelScanInterval, 'seconds');
 
       setTimeout(mainLoop, config.modelScanInterval * 1000);
     });
 }
 
-mainLoop();
+Promise
+  .try(() => session.get('http://showup.tv/site/accept_rules/yes?ref=http://showup.tv/site/log_in', {
+    headers: {
+      referer: 'http://showup.tv/site/accept_rules?ref=http://showup.tv/site/log_in',
+    },
+  }))
+  .then(() => mkdirpAsync(captureDirectory))
+  .then(() => mainLoop())
+  .catch((err) => {
+    printErrorMsg(err.toString());
+  });
